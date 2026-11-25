@@ -24,6 +24,9 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reviewComment, setReviewComment] = useState("");
+  const [reviewerName, setReviewerName] = useState(() => localStorage.getItem("ultrasound_reviewer_name") || "");
+  const [uploadProgress, setUploadProgress] = useState({ done: 0, total: 0 });
+  const savingRef = useRef(false);
   const [signedFiles, setSignedFiles] = useState({ reports: [], images: [] });
   const [busyAction, setBusyAction] = useState(false);
   const reportUploadRef = useRef(null);
@@ -87,39 +90,68 @@ function App() {
     return "";
   }
 
-  async function uploadFiles(caseId, files, folder) {
-    const paths = [];
-    for (const file of files) {
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const path = `${caseId}/${folder}/${crypto.randomUUID()}-${safeName}`;
-      const extension = file.name.split(".").pop()?.toLowerCase();
-      const inferredType = ({ pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })[extension] || file.type;
-      const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
-        cacheControl: "3600", upsert: false, contentType: inferredType || "application/octet-stream"
-      });
-      if (error) throw new Error(`Upload failed for ${file.name}: ${error.message}`);
-      paths.push({ path, name: file.name, size: file.size, type: file.type || "application/octet-stream" });
+  async function uploadFiles(caseId, files, folder, onFileDone) {
+    const results = new Array(files.length);
+    let nextIndex = 0;
+    let uploadError = null;
+    const worker = async () => {
+      while (!uploadError) {
+        const index = nextIndex++;
+        if (index >= files.length) return;
+        const file = files[index];
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const path = `${caseId}/${folder}/${crypto.randomUUID()}-${safeName}`;
+        const extension = file.name.split(".").pop()?.toLowerCase();
+        const inferredType = ({ pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" })[extension] || file.type;
+        const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
+          cacheControl: "3600", upsert: false, contentType: inferredType || "application/octet-stream"
+        });
+        if (error) { uploadError = new Error(`Upload failed for ${file.name}: ${error.message}`); return; }
+        results[index] = { path, name: file.name, size: file.size, type: file.type || inferredType || "application/octet-stream" };
+        onFileDone?.(file);
+      }
+    };
+    // A small parallel pool is faster than one-by-one uploads without
+    // overwhelming mobile connections or the browser with too many requests.
+    await Promise.all(Array.from({ length: Math.min(3, files.length) }, worker));
+    if (uploadError) {
+      uploadError.uploadedPaths = results.filter(Boolean);
+      throw uploadError;
     }
-    return paths;
+    return results;
   }
 
   async function addCase(event) {
     event.preventDefault();
+    if (savingRef.current) return;
     if (!supabase) return notify("Supabase is not configured. Please check Netlify environment variables.", "error");
     if (!patientName.trim() || !labNumber.trim()) return notify("Patient Name and Lab Number are required.", "error");
     const reportError = validateFiles(reportFiles, "Report / Document");
     const imageError = validateFiles(imageFiles, "Ultrasound Images");
     if (reportError || imageError) return notify(reportError || imageError, "error");
 
+    savingRef.current = true;
     setSaving(true);
+    const allFilesCount = reportFiles.length + imageFiles.length;
+    setUploadProgress({ done: 0, total: allFilesCount });
     let uploadedReportPaths = [];
     let uploadedImagePaths = [];
     const caseId = crypto.randomUUID();
     try {
-      notify("Uploading report/document files…", "info");
-      uploadedReportPaths = await uploadFiles(caseId, reportFiles, "reports");
-      notify("Uploading ultrasound images…", "info");
-      uploadedImagePaths = await uploadFiles(caseId, imageFiles, "images");
+      notify(`Uploading ${allFilesCount} attachment(s)…`, "info");
+      const onFileDone = () => setUploadProgress((previous) => ({ ...previous, done: previous.done + 1 }));
+      // Upload report and image groups at the same time; each group uses a
+      // maximum of three concurrent uploads.
+      const uploadResults = await Promise.allSettled([
+        uploadFiles(caseId, reportFiles, "reports", onFileDone),
+        uploadFiles(caseId, imageFiles, "images", onFileDone)
+      ]);
+      if (uploadResults[0].status === "fulfilled") uploadedReportPaths = uploadResults[0].value;
+      else uploadedReportPaths = uploadResults[0].reason?.uploadedPaths || [];
+      if (uploadResults[1].status === "fulfilled") uploadedImagePaths = uploadResults[1].value;
+      else uploadedImagePaths = uploadResults[1].reason?.uploadedPaths || [];
+      const failedUpload = uploadResults.find((result) => result.status === "rejected");
+      if (failedUpload) throw failedUpload.reason;
       notify("Saving case details…", "info");
       const payload = {
         id: caseId,
@@ -131,18 +163,22 @@ function App() {
         report_files: uploadedReportPaths,
         ultrasound_files: uploadedImagePaths
       };
-      const { error } = await supabase.from("ultrasound_cases").insert(payload);
+      const { data: savedCase, error } = await supabase.from("ultrasound_cases").insert(payload).select().single();
       if (error) throw new Error(`Case save failed: ${error.message}`);
+      setCases((previous) => [savedCase, ...previous.filter((item) => item.id !== savedCase.id)]);
       setShowAdd(false);
       setPatientName(""); setLabNumber(""); setReportFiles([]); setImageFiles([]);
       notify("Case and attachments saved successfully. The case is now in the Sonologist review queue.", "success");
-      await loadCases();
+      // Refresh in the background so the form does not wait for a second query.
+      loadCases();
     } catch (error) {
       const cleanup = [...uploadedReportPaths, ...uploadedImagePaths].map((f) => f.path);
       if (cleanup.length && supabase) await supabase.storage.from(BUCKET).remove(cleanup);
       notify(error.message || "Unable to save case. Please try again.", "error");
     } finally {
+      savingRef.current = false;
       setSaving(false);
+      setUploadProgress({ done: 0, total: 0 });
     }
   }
 
@@ -164,11 +200,22 @@ function App() {
   async function updateCaseStatus(status) {
     if (!selectedCase || !supabase) return;
     setBusyAction(true);
-    const { error } = await supabase.from("ultrasound_cases").update({
+    if (!reviewerName.trim()) {
+      setBusyAction(false);
+      return notify("Please enter the reviewing sonologist's name before completing this action.", "error");
+    }
+    const reviewedAt = new Date().toISOString();
+    const updatePayload = {
       status,
       review_comment: reviewComment.trim() || null,
-      reviewed_at: new Date().toISOString()
-    }).eq("id", selectedCase.id);
+      reviewed_at: reviewedAt,
+      reviewed_by: reviewerName.trim()
+    };
+    if (status === "approved") {
+      updatePayload.approved_by = reviewerName.trim();
+      updatePayload.approved_at = reviewedAt;
+    }
+    const { error } = await supabase.from("ultrasound_cases").update(updatePayload).eq("id", selectedCase.id);
     setBusyAction(false);
     if (error) return notify(`Could not update case: ${error.message}`, "error");
     setSelectedCase(null);
@@ -218,7 +265,7 @@ function App() {
         <div className="rowBetween"><div><h2>Cases Awaiting Final Review</h2><p className="muted">Open a case to view the submitted report and ultrasound images.</p></div><button className="secondary" onClick={refresh} disabled={loading}><RefreshCw size={14}/> Refresh</button></div>
         <CaseTable cases={filteredCases} loading={loading} onOpen={openCase}/>
       </section>}
-      <footer>Ultrasound Online Review & Reporting <span>Development version 0.2.0</span></footer>
+      <footer>Ultrasound Online Review & Reporting <span>Development version 0.2.1</span></footer>
     </main>
 
     {showAdd && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowAdd(false); }}>
@@ -229,6 +276,7 @@ function App() {
         <Attachment label="Report / Document *" files={reportFiles} setFiles={setReportFiles} uploadRef={reportUploadRef} cameraRef={reportCameraRef} accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,image/*,application/pdf" help="Upload PDF/document or capture a photo directly. Multiple files are supported." disabled={saving}/>
         <Attachment label="Ultrasound Images *" files={imageFiles} setFiles={setImageFiles} uploadRef={imageUploadRef} cameraRef={imageCameraRef} accept="image/*,.jpg,.jpeg,.png,.webp" help="Upload multiple images or capture photos directly with your device camera." disabled={saving}/>
         <p className="hint">Maximum file size: 50 MB per file. Allowed formats: PDF, JPG, PNG, WEBP, DOC and DOCX.</p>
+        {saving && uploadProgress.total > 0 && <div className="uploadProgress"><div className="progressLabel"><span>Uploading attachments</span><strong>{uploadProgress.done}/{uploadProgress.total}</strong></div><div className="progressTrack"><span style={{ width: `${(uploadProgress.done / uploadProgress.total) * 100}%` }}/></div></div>}
         <div className="modalActions"><button type="button" className="secondary" onClick={() => setShowAdd(false)} disabled={saving}>Cancel</button><button className="primary" disabled={saving}>{saving ? <><LoaderCircle size={15} className="spin"/> Saving case…</> : "Save & Send for Review"}</button></div>
       </form>
     </div>}
@@ -236,12 +284,13 @@ function App() {
     {selectedCase && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busyAction) setSelectedCase(null); }}>
       <section className="modal caseModal">
         <div className="rowBetween"><div><h2>{selectedCase.patient_name}</h2><p className="muted">Lab Number: {selectedCase.lab_number} · {new Date(selectedCase.created_at).toLocaleString()}</p></div><button className="iconButton" onClick={() => setSelectedCase(null)}><X size={18}/></button></div>
-        <p><span className="status">{prettyStatus(selectedCase.status)}</span></p>
+        <p><span className={`status ${selectedCase.status}`}>{prettyStatus(selectedCase.status)}</span></p>
+        {selectedCase.status === "approved" && <p className="approvalMeta"><CheckCircle2 size={15}/> Approved by <strong>{selectedCase.approved_by || "Not recorded for this earlier approval"}</strong>{selectedCase.approved_at ? ` · ${new Date(selectedCase.approved_at).toLocaleString()}` : ""}</p>}
         <h3><FileText size={16}/> Report / Documents</h3>
         <FileLinks files={signedFiles.reports}/>
         <h3><ImageIcon size={16}/> Ultrasound Images</h3>
         <div className="imageGrid">{signedFiles.images.map((file) => <a key={file.path} href={file.url || "#"} target="_blank" rel="noreferrer" className="imageThumb">{file.url ? <img src={file.url} alt={file.name}/> : <span>Preview unavailable</span>}<small>{file.name}</small></a>)}</div>
-        {role === "Sonologist" && selectedCase.status !== "approved" && <><Field label="Review comments"><textarea value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder="Enter comments or required corrections" rows="3"/></Field><div className="modalActions"><button className="secondary" onClick={() => updateCaseStatus("changes_requested")} disabled={busyAction}>Request Changes</button><button className="primary" onClick={() => updateCaseStatus("approved")} disabled={busyAction}><CheckCircle2 size={15}/> Approve Case</button></div></>}
+        {role === "Sonologist" && selectedCase.status !== "approved" && <><Field label="Sonologist name *"><input value={reviewerName} onChange={(e) => { setReviewerName(e.target.value); localStorage.setItem("ultrasound_reviewer_name", e.target.value); }} placeholder="Enter your full name" required/></Field><Field label="Review comments"><textarea value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder="Enter comments or required corrections" rows="3"/></Field><div className="modalActions"><button className="secondary" onClick={() => updateCaseStatus("changes_requested")} disabled={busyAction}>Request Changes</button><button className="primary" onClick={() => updateCaseStatus("approved")} disabled={busyAction}><CheckCircle2 size={15}/> Approve Case</button></div></>}
         {role !== "Sonologist" && selectedCase.review_comment && <p className="reviewNote"><MessageSquare size={15}/> {selectedCase.review_comment}</p>}
       </section>
     </div>}
@@ -272,7 +321,7 @@ function Attachment({ label, files, setFiles, uploadRef, cameraRef, accept, help
 function CaseTable({ cases, loading, onOpen }) {
   if (loading) return <p className="empty"><LoaderCircle className="spin" size={16}/> Loading cases from Supabase…</p>;
   if (!cases.length) return <p className="empty">No ultrasound cases found for this selection.</p>;
-  return <div className="tableWrap"><table><thead><tr><th>Patient</th><th>Lab Number</th><th>Date</th><th>Status</th><th>Attachments</th><th>Action</th></tr></thead><tbody>{cases.map((item) => <tr key={item.id}><td>{item.patient_name}</td><td>{item.lab_number}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><span className={`status ${item.status}`}>{prettyStatus(item.status)}</span></td><td>{(item.report_files?.length || 0)} report · {(item.ultrasound_files?.length || 0)} images</td><td><button className="secondary smallButton" onClick={() => onOpen(item)}><Eye size={13}/> Open</button></td></tr>)}</tbody></table></div>;
+  return <div className="tableWrap"><table><thead><tr><th>Patient</th><th>Lab Number</th><th>Date</th><th>Status</th><th>Approved By</th><th>Attachments</th><th>Action</th></tr></thead><tbody>{cases.map((item) => <tr key={item.id}><td>{item.patient_name}</td><td>{item.lab_number}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><span className={`status ${item.status}`}>{prettyStatus(item.status)}</span></td><td>{item.status === "approved" ? (item.approved_by || "Not recorded") : "—"}{item.approved_at && <small className="approvedTime">{new Date(item.approved_at).toLocaleString()}</small>}</td><td>{(item.report_files?.length || 0)} report · {(item.ultrasound_files?.length || 0)} images</td><td><button className="secondary smallButton" onClick={() => onOpen(item)}><Eye size={13}/> Open</button></td></tr>)}</tbody></table></div>;
 }
 
 function CasePanel({ title, cases, loading, onRefresh, onOpen }) {

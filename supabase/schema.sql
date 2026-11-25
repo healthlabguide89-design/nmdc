@@ -18,7 +18,10 @@ create table if not exists public.ultrasound_cases (
   report_files jsonb not null default '[]'::jsonb,
   ultrasound_files jsonb not null default '[]'::jsonb,
   review_comment text,
+  reviewed_by text,
   reviewed_at timestamptz,
+  approved_by text,
+  approved_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -28,7 +31,10 @@ alter table public.ultrasound_cases add column if not exists submitted_role text
 alter table public.ultrasound_cases add column if not exists report_files jsonb not null default '[]'::jsonb;
 alter table public.ultrasound_cases add column if not exists ultrasound_files jsonb not null default '[]'::jsonb;
 alter table public.ultrasound_cases add column if not exists review_comment text;
+alter table public.ultrasound_cases add column if not exists reviewed_by text;
 alter table public.ultrasound_cases add column if not exists reviewed_at timestamptz;
+alter table public.ultrasound_cases add column if not exists approved_by text;
+alter table public.ultrasound_cases add column if not exists approved_at timestamptz;
 
 -- The old starter schema required a profile foreign key. Authentication is not
 -- enabled in this temporary test phase, so make that legacy column optional.

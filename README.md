@@ -60,3 +60,11 @@ Replace the existing repository files with this project's files, preserving fold
 - Assignment of cases to specific sonologists.
 
 The current role selector is a development preview only, not authentication or access control.
+
+
+## Version 0.2.1 changes
+- Added Approved By and approval timestamp to case lists and case details.
+- Sonologist enters their display name when approving or requesting changes (temporary test mode; real identity will come from authentication later).
+- Uploads now run in a small parallel pool, with a visible attachment progress indicator.
+- Case list refresh happens in the background after a successful save.
+- Re-run `supabase/schema.sql` once to add the new approval metadata columns; the migration uses `ADD COLUMN IF NOT EXISTS` and preserves existing cases.
