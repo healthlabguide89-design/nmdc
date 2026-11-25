@@ -87,3 +87,25 @@ create policy "ultrasound_test_anon_storage_select" on storage.objects for selec
 create policy "ultrasound_test_anon_storage_insert" on storage.objects for insert to anon with check (bucket_id = 'ultrasound-files');
 create policy "ultrasound_test_anon_storage_update" on storage.objects for update to anon using (bucket_id = 'ultrasound-files') with check (bucket_id = 'ultrasound-files');
 create policy "ultrasound_test_anon_storage_delete" on storage.objects for delete to anon using (bucket_id = 'ultrasound-files');
+
+-- Case edit tracking and database-level protection for approved cases.
+alter table public.ultrasound_cases add column if not exists edited_by text;
+alter table public.ultrasound_cases add column if not exists edited_at timestamptz;
+
+create or replace function public.prevent_approved_ultrasound_case_delete()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if old.status = 'approved' then
+    raise exception 'Approved cases cannot be deleted.' using errcode = '42501';
+  end if;
+  return old;
+end;
+$$;
+
+drop trigger if exists ultrasound_cases_prevent_approved_delete on public.ultrasound_cases;
+create trigger ultrasound_cases_prevent_approved_delete
+before delete on public.ultrasound_cases
+for each row execute function public.prevent_approved_ultrasound_case_delete();

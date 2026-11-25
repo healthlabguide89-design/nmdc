@@ -14,6 +14,13 @@ function App() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [showAdd, setShowAdd] = useState(false);
+  const [editingCase, setEditingCase] = useState(null);
+  const [editPatientName, setEditPatientName] = useState("");
+  const [editLabNumber, setEditLabNumber] = useState("");
+  const [keptReportFiles, setKeptReportFiles] = useState([]);
+  const [keptImageFiles, setKeptImageFiles] = useState([]);
+  const [newReportFiles, setNewReportFiles] = useState([]);
+  const [newImageFiles, setNewImageFiles] = useState([]);
   const [selectedCase, setSelectedCase] = useState(null);
   const [patientName, setPatientName] = useState("");
   const [labNumber, setLabNumber] = useState("");
@@ -33,6 +40,10 @@ function App() {
   const reportCameraRef = useRef(null);
   const imageUploadRef = useRef(null);
   const imageCameraRef = useRef(null);
+  const editReportUploadRef = useRef(null);
+  const editReportCameraRef = useRef(null);
+  const editImageUploadRef = useRef(null);
+  const editImageCameraRef = useRef(null);
 
   const configured = Boolean(supabase);
 
@@ -197,6 +208,93 @@ function App() {
     setSignedFiles({ reports, images });
   }
 
+  function beginEditCase(item) {
+    setEditingCase(item);
+    setEditPatientName(item.patient_name || "");
+    setEditLabNumber(item.lab_number || "");
+    setKeptReportFiles(item.report_files || []);
+    setKeptImageFiles(item.ultrasound_files || []);
+    setNewReportFiles([]);
+    setNewImageFiles([]);
+    setNotice("");
+  }
+
+  async function saveEditedCase(event) {
+    event.preventDefault();
+    if (!editingCase || !supabase || busyAction) return;
+    if (!editPatientName.trim() || !editLabNumber.trim()) return notify("Patient Name and Lab Number are required.", "error");
+    if (!keptReportFiles.length && !newReportFiles.length) return notify("At least one Report / Document must remain attached.", "error");
+    if (!keptImageFiles.length && !newImageFiles.length) return notify("At least one Ultrasound Image must remain attached.", "error");
+    const reportError = newReportFiles.length ? validateFiles(newReportFiles, "Report / Document") : "";
+    const imageError = newImageFiles.length ? validateFiles(newImageFiles, "Ultrasound Images") : "";
+    if (reportError || imageError) return notify(reportError || imageError, "error");
+
+    setBusyAction(true);
+    let newlyUploaded = [];
+    try {
+      notify("Uploading new attachments…", "info");
+      const [uploadedReports, uploadedImages] = await Promise.all([
+        newReportFiles.length ? uploadFiles(editingCase.id, newReportFiles, "reports") : Promise.resolve([]),
+        newImageFiles.length ? uploadFiles(editingCase.id, newImageFiles, "images") : Promise.resolve([])
+      ]);
+      newlyUploaded = [...uploadedReports, ...uploadedImages];
+      const keptPaths = new Set([...keptReportFiles, ...keptImageFiles].map((file) => file.path));
+      const oldFiles = [...(editingCase.report_files || []), ...(editingCase.ultrasound_files || [])];
+      const filesToRemove = oldFiles.filter((file) => !keptPaths.has(file.path)).map((file) => file.path);
+      const updatePayload = {
+        patient_name: editPatientName.trim(),
+        lab_number: editLabNumber.trim(),
+        report_files: [...keptReportFiles, ...uploadedReports],
+        ultrasound_files: [...keptImageFiles, ...uploadedImages],
+        edited_by: "Sonographer (test mode)",
+        edited_at: new Date().toISOString()
+      };
+      const { data, error } = await supabase.from("ultrasound_cases").update(updatePayload).eq("id", editingCase.id).select().single();
+      if (error) throw new Error(`Could not update case: ${error.message}`);
+      let cleanupWarning = "";
+      if (filesToRemove.length) {
+        const { error: removeError } = await supabase.storage.from(BUCKET).remove(filesToRemove);
+        if (removeError) cleanupWarning = ` Case data was saved, but some removed files could not be cleaned up from storage: ${removeError.message}`;
+      }
+      setCases((previous) => previous.map((item) => item.id === data.id ? data : item));
+      setEditingCase(null);
+      notify(cleanupWarning ? `Case updated.${cleanupWarning}` : "Case updated successfully. Its current review/approval status has been preserved.", cleanupWarning ? "error" : "success");
+      loadCases();
+    } catch (error) {
+      if (newlyUploaded.length) await supabase.storage.from(BUCKET).remove(newlyUploaded.map((file) => file.path));
+      notify(error.message || "Unable to update case. Please try again.", "error");
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
+  async function deleteCase(item) {
+    if (!supabase || busyAction) return;
+    if (item.status === "approved") return notify("Approved cases cannot be deleted.", "error");
+    const confirmed = window.confirm(`Delete the case for ${item.patient_name} (Lab No. ${item.lab_number})? This will also delete its attached report and ultrasound images. This action cannot be undone.`);
+    if (!confirmed) return;
+    setBusyAction(true);
+    try {
+      const paths = [...(item.report_files || []), ...(item.ultrasound_files || [])].map((file) => file.path);
+      const { error } = await supabase.from("ultrasound_cases").delete().eq("id", item.id);
+      if (error) throw new Error(error.message.includes("Approved cases cannot be deleted") ? "Approved cases cannot be deleted." : `Could not delete case: ${error.message}`);
+      setCases((previous) => previous.filter((row) => row.id !== item.id));
+      if (paths.length) {
+        const { error: storageError } = await supabase.storage.from(BUCKET).remove(paths);
+        if (storageError) {
+          notify(`Case record deleted, but its attachments need storage cleanup: ${storageError.message}`, "error");
+          return;
+        }
+      }
+      notify("Case and its attachments deleted successfully.", "success");
+    } catch (error) {
+      notify(error.message || "Unable to delete case.", "error");
+      loadCases();
+    } finally {
+      setBusyAction(false);
+    }
+  }
+
   async function updateCaseStatus(status) {
     if (!selectedCase || !supabase) return;
     setBusyAction(true);
@@ -258,14 +356,14 @@ function App() {
         <div className="rowBetween"><div><h2>My Ultrasound Cases</h2><p className="muted">Track each case. After approval, open the case to print for patient dispatch.</p></div><div className="buttonRow"><button className="primary" onClick={() => { setShowAdd(true); setNotice(""); }}>+ Add Case</button><button className="secondary" onClick={refresh} disabled={loading}><RefreshCw size={14}/> Refresh</button></div></div>
         <Field label="Show cases"><select className="filter" value={filter} onChange={(e) => setFilter(e.target.value)}><option>Today + Yesterday</option><option>Today only</option><option>Select date range</option><option>All cases</option></select></Field>
         {filter === "Select date range" && <div className="dateRow"><Field label="From"><input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}/></Field><Field label="To"><input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}/></Field></div>}
-        <CaseTable cases={filteredCases} loading={loading} onOpen={openCase}/>
+        <CaseTable cases={filteredCases} loading={loading} onOpen={openCase} role={role} onEdit={beginEditCase} onDelete={deleteCase}/>
       </section>}
 
       {role === "Sonologist" && <section className="panel">
         <div className="rowBetween"><div><h2>Cases Awaiting Final Review</h2><p className="muted">Open a case to view the submitted report and ultrasound images.</p></div><button className="secondary" onClick={refresh} disabled={loading}><RefreshCw size={14}/> Refresh</button></div>
         <CaseTable cases={filteredCases} loading={loading} onOpen={openCase}/>
       </section>}
-      <footer>Ultrasound Online Review & Reporting <span>Development version 0.2.1</span></footer>
+      <footer>Ultrasound Online Review & Reporting <span>Development version 0.2.2</span></footer>
     </main>
 
     {showAdd && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowAdd(false); }}>
@@ -281,11 +379,27 @@ function App() {
       </form>
     </div>}
 
+    {editingCase && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busyAction) setEditingCase(null); }}>
+      <form className="modal" onSubmit={saveEditedCase}>
+        <div className="rowBetween"><div><h2>Edit Ultrasound Case</h2><p className="muted">Update patient details and attachments. The current case status and approval details will be preserved.</p></div><button type="button" className="iconButton" onClick={() => !busyAction && setEditingCase(null)} disabled={busyAction}><X size={18}/></button></div>
+        <p><span className={`status ${editingCase.status}`}>{prettyStatus(editingCase.status)}</span>{editingCase.status === "approved" && <span className="approvalInline"> Approved by {editingCase.approved_by || "Not recorded"}</span>}</p>
+        <Field label="Patient Name *"><input value={editPatientName} onChange={(e) => setEditPatientName(e.target.value)} required disabled={busyAction}/></Field>
+        <Field label="Lab Number *"><input value={editLabNumber} onChange={(e) => setEditLabNumber(e.target.value)} required disabled={busyAction}/></Field>
+        <ExistingAttachments label="Existing Report / Documents" files={keptReportFiles} setFiles={setKeptReportFiles} disabled={busyAction}/>
+        <Attachment label="Add Report / Document" files={newReportFiles} setFiles={setNewReportFiles} uploadRef={editReportUploadRef} cameraRef={editReportCameraRef} accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,image/*,application/pdf" help="Add more documents or capture a new photo. Existing files remain unless removed above." disabled={busyAction}/>
+        <ExistingAttachments label="Existing Ultrasound Images" files={keptImageFiles} setFiles={setKeptImageFiles} disabled={busyAction}/>
+        <Attachment label="Add Ultrasound Images" files={newImageFiles} setFiles={setNewImageFiles} uploadRef={editImageUploadRef} cameraRef={editImageCameraRef} accept="image/*,.jpg,.jpeg,.png,.webp" help="Add multiple images or capture photos directly." disabled={busyAction}/>
+        <p className="hint">At least one report/document and one ultrasound image must remain attached. Maximum 50 MB per file.</p>
+        <div className="modalActions"><button type="button" className="secondary" onClick={() => setEditingCase(null)} disabled={busyAction}>Cancel</button><button className="primary" disabled={busyAction}>{busyAction ? <><LoaderCircle size={15} className="spin"/> Saving changes…</> : "Save Changes"}</button></div>
+      </form>
+    </div>}
+
     {selectedCase && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !busyAction) setSelectedCase(null); }}>
       <section className="modal caseModal">
         <div className="rowBetween"><div><h2>{selectedCase.patient_name}</h2><p className="muted">Lab Number: {selectedCase.lab_number} · {new Date(selectedCase.created_at).toLocaleString()}</p></div><button className="iconButton" onClick={() => setSelectedCase(null)}><X size={18}/></button></div>
         <p><span className={`status ${selectedCase.status}`}>{prettyStatus(selectedCase.status)}</span></p>
         {selectedCase.status === "approved" && <p className="approvalMeta"><CheckCircle2 size={15}/> Approved by <strong>{selectedCase.approved_by || "Not recorded for this earlier approval"}</strong>{selectedCase.approved_at ? ` · ${new Date(selectedCase.approved_at).toLocaleString()}` : ""}</p>}
+        {selectedCase.edited_at && <p className="hint">Last edited by {selectedCase.edited_by || "Unknown"} · {new Date(selectedCase.edited_at).toLocaleString()}</p>}
         <h3><FileText size={16}/> Report / Documents</h3>
         <FileLinks files={signedFiles.reports}/>
         <h3><ImageIcon size={16}/> Ultrasound Images</h3>
@@ -318,10 +432,17 @@ function Attachment({ label, files, setFiles, uploadRef, cameraRef, accept, help
   </div>;
 }
 
-function CaseTable({ cases, loading, onOpen }) {
+function ExistingAttachments({ label, files, setFiles, disabled }) {
+  return <div className="field"><span>{label}</span>
+    {!files.length && <p className="hint">No existing files. Add at least one new file below.</p>}
+    {files.length > 0 && <ul className="fileList">{files.map((file) => <li key={file.path}><span>{file.name} <small>({(file.size / 1024 / 1024).toFixed(2)} MB)</small></span><button type="button" aria-label={`Remove ${file.name}`} onClick={() => setFiles((previous) => previous.filter((item) => item.path !== file.path))} disabled={disabled}><X size={14}/></button></li>)}</ul>}
+  </div>;
+}
+
+function CaseTable({ cases, loading, onOpen, role, onEdit, onDelete }) {
   if (loading) return <p className="empty"><LoaderCircle className="spin" size={16}/> Loading cases from Supabase…</p>;
   if (!cases.length) return <p className="empty">No ultrasound cases found for this selection.</p>;
-  return <div className="tableWrap"><table><thead><tr><th>Patient</th><th>Lab Number</th><th>Date</th><th>Status</th><th>Approved By</th><th>Attachments</th><th>Action</th></tr></thead><tbody>{cases.map((item) => <tr key={item.id}><td>{item.patient_name}</td><td>{item.lab_number}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><span className={`status ${item.status}`}>{prettyStatus(item.status)}</span></td><td>{item.status === "approved" ? (item.approved_by || "Not recorded") : "—"}{item.approved_at && <small className="approvedTime">{new Date(item.approved_at).toLocaleString()}</small>}</td><td>{(item.report_files?.length || 0)} report · {(item.ultrasound_files?.length || 0)} images</td><td><button className="secondary smallButton" onClick={() => onOpen(item)}><Eye size={13}/> Open</button></td></tr>)}</tbody></table></div>;
+  return <div className="tableWrap"><table><thead><tr><th>Patient</th><th>Lab Number</th><th>Date</th><th>Status</th><th>Approved By</th><th>Attachments</th><th>Action</th></tr></thead><tbody>{cases.map((item) => <tr key={item.id}><td>{item.patient_name}</td><td>{item.lab_number}</td><td>{new Date(item.created_at).toLocaleString()}</td><td><span className={`status ${item.status}`}>{prettyStatus(item.status)}</span></td><td>{item.status === "approved" ? (item.approved_by || "Not recorded") : "—"}{item.approved_at && <small className="approvedTime">{new Date(item.approved_at).toLocaleString()}</small>}</td><td>{(item.report_files?.length || 0)} report · {(item.ultrasound_files?.length || 0)} images</td><td><div className="caseActions"><button className="secondary smallButton" onClick={() => onOpen(item)}><Eye size={13}/> Open</button>{role === "Sonographer" && <><button className="secondary smallButton" onClick={() => onEdit(item)}><FileText size={13}/> Edit</button>{item.status !== "approved" && <button className="danger smallButton" onClick={() => onDelete(item)}><X size={13}/> Delete</button>}</>}</div></td></tr>)}</tbody></table></div>;
 }
 
 function CasePanel({ title, cases, loading, onRefresh, onOpen }) {
