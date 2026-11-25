@@ -1,89 +1,62 @@
-# Ultrasound Online Review & Reporting
+# Ultrasound Online Review & Reporting — v0.2.0
 
-Initial GitHub-ready starter for the workflow and screens shared so far.
+React + Vite application connected to Supabase for the first functional case-submission workflow.
 
-## Included in this starter
+## What's implemented in v0.2.0
 
-- Admin workspace:
-  - Ultrasound user account creation UI
-  - All Cases navigation placeholder
-  - Archive & Storage screen with monthly backup/import/delete UI
-- Sonographer workspace:
-  - My Cases
-  - Date filters: Today + Yesterday, Today only, Select date range, All cases
-  - Add Case modal with patient name, lab number, report/document and ultrasound images
-  - File selection and direct camera capture inputs for **both** report/document and ultrasound images
-  - Multiple ultrasound image selection
-- Sonologist workspace:
-  - Review Queue
-  - Cases awaiting final review
-- Supabase client configuration through environment variables
-- Starter SQL schema for profiles and ultrasound cases
-- Render static-site deployment configuration
+- Supabase database read/write for ultrasound cases.
+- Actual upload of report/document files and multiple ultrasound images to a private Supabase Storage bucket.
+- Separate upload-from-device and direct camera-capture controls for both attachment groups.
+- File list with remove-before-submit controls and 50 MB per-file validation.
+- Persistent case list loaded from Supabase after refresh/reopening.
+- Case details view with signed links to private stored files.
+- Sonologist review queue with Approve and Request Changes actions.
+- Admin All Cases list.
 
-## Important status
+## Critical test-mode security warning
 
-This is a **starter implementation / UI prototype**, not a production-ready medical reporting system.
-The detailed case review screen, final report authoring/signature, PDF generation, role-based access policies, audit trail, retention rules, and tested backup/restore workflow still need to be specified and implemented. No real patient data should be entered until authentication, database policies, storage policies, and backups have been configured and tested.
+This release intentionally uses temporary anonymous Supabase policies so the workflow can be exercised before login/password and role management are built. Anyone who can access the public website can read, add, update and delete records/files while these policies remain enabled.
 
-## Run locally
+**Use dummy/test patient names, fake lab numbers and non-clinical sample files only. Never upload real patient records, reports, images or identifiable information.** These policies must be replaced by authenticated role-based Row Level Security and private storage policies before any real clinical use.
 
-1. Install Node.js (LTS).
-2. Extract this ZIP.
-3. Open a terminal in this folder.
-4. Run:
+## Supabase setup (required before the new app version works)
 
-   ```bash
-   npm install
-   cp .env.example .env
-   npm run dev
-   ```
+1. Open Supabase Dashboard → SQL Editor → New query.
+2. Open `supabase/schema.sql` from this project and copy the complete SQL.
+3. Paste it into SQL Editor and click Run.
+4. Confirm the `ultrasound_cases` table exists under Table Editor.
+5. Confirm the private Storage bucket `ultrasound-files` exists under Storage.
+6. Keep the existing Netlify environment variables:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY` (Supabase Publishable key)
+7. Redeploy the new GitHub commit in Netlify. Vite environment variables are read at build time.
 
-5. Open the local URL printed by Vite.
+If Supabase reports a SQL error, stop and resolve it before uploading files. Do not create broad policies manually in addition to this script.
 
-On Windows PowerShell, copy the environment file with:
+## Local development
+
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
+
+On Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-The UI can be explored without Supabase credentials. Data is held in browser memory for this prototype and will reset on refresh.
+## GitHub update
 
-## Connect Supabase
+Replace the existing repository files with this project's files, preserving folder paths, then commit and push to `main`. Netlify should build the new commit automatically if auto-publishing is enabled.
 
-1. Create a Supabase project.
-2. In Project Settings → API, copy the Project URL and anon/public key.
-3. Add them to `.env` as `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
-4. Run `supabase/schema.sql` in Supabase SQL Editor.
-5. Configure authentication and Storage policies before using real patient records.
+## Current scope / not yet implemented
 
-Never put a Supabase service-role key in frontend code or in a `VITE_` variable.
+- User login, password management, admin-created accounts and real role-based access.
+- Production-grade RLS, audit trail and per-user case ownership.
+- Full report authoring, digital signature, final PDF generation and print dispatch.
+- ZIP backup/restore including attachments and verified archive deletion.
+- Assignment of cases to specific sonologists.
 
-## GitHub
-
-Create an empty GitHub repository, then from this folder:
-
-```bash
-git init
-git add .
-git commit -m "Initial ultrasound review app"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/YOUR-REPOSITORY.git
-git push -u origin main
-```
-
-## Render
-
-1. In Render, choose **New → Static Site** and connect the GitHub repository.
-2. Build command: `npm install && npm run build`
-3. Publish directory: `dist`
-4. Add environment variables:
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-5. Deploy.
-
-`render.yaml` is included as a starting blueprint. Review its settings in Render before deployment.
-
-## Current workflow assumption
-
-Sonographer creates and submits a case. Sonologist receives it in the Review Queue. The exact actions and screen after opening a queued case have not yet been provided, so approval/sign-off is not implemented beyond the queue placeholder.
+The current role selector is a development preview only, not authentication or access control.
