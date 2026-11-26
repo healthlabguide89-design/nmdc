@@ -363,7 +363,7 @@ function App() {
         <div className="rowBetween"><div><h2>Cases Awaiting Final Review</h2><p className="muted">Open a case to view the submitted report and ultrasound images.</p></div><button className="secondary" onClick={refresh} disabled={loading}><RefreshCw size={14}/> Refresh</button></div>
         <CaseTable cases={filteredCases} loading={loading} onOpen={openCase}/>
       </section>}
-      <footer>Ultrasound Online Review & Reporting <span>Development version 0.2.2</span></footer>
+      <footer>Ultrasound Online Review & Reporting <span>Development version V5</span></footer>
     </main>
 
     {showAdd && <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget && !saving) setShowAdd(false); }}>

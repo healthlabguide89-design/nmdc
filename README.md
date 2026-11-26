@@ -1,4 +1,4 @@
-# Ultrasound Online Review & Reporting — v0.2.0
+# Ultrasound Online Review & Reporting — V5
 
 React + Vite application connected to Supabase for the first functional case-submission workflow.
 
@@ -78,3 +78,11 @@ The current role selector is a development preview only, not authentication or a
 - Edit audit fields `edited_by` and `edited_at` are recorded (test-mode identity until real login is implemented).
 
 Run the updated `supabase/schema.sql` in Supabase SQL Editor before deploying this version. The migration only adds columns and a trigger; it does not delete existing cases.
+
+
+## V5 – Mobile form action layout
+- On mobile screens, Add Case and Edit Case modal action buttons are stacked vertically.
+- The primary Save / Save & Send for Review action appears first and spans the full available width.
+- Extra bottom clearance is reserved inside the modal so the Netlify badge does not cover the primary action.
+- The modal remains scrollable on small screens; desktop layout is unchanged.
+- No database schema or existing record changes are required for this CSS/layout-only update.
